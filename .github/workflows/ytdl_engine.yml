@@ -28,7 +28,6 @@ jobs:
         with:
           python-version: '3.11'
 
-      # Pasang Deno sebagai JS runtime resmi yang didukung yt-dlp
       - name: Install Deno & Dependencies
         run: |
           sudo apt-get update && sudo apt-get install -y ffmpeg
@@ -43,38 +42,37 @@ jobs:
         run: |
           JOB_ID="${{ github.event.inputs.job_id }}"
           RAW_QUALITY="${{ github.event.inputs.quality }}"
-          # Bersihkan huruf 'p' jika Android mengirim '1080p' -> menjadi '1080'
           CLEAN_QUALITY=$(echo "$RAW_QUALITY" | tr -cd '0-9')
           [ -z "$CLEAN_QUALITY" ] && CLEAN_QUALITY="1080"
 
           mkdir -p output
 
-          # Buat file cookies jika secret tersedia
           COOKIE_ARG=""
           if [ -n "$YT_COOKIES" ]; then
             echo "$YT_COOKIES" > cookies.txt
             COOKIE_ARG="--cookies cookies.txt"
           fi
 
-          # Tentukan selector format yt-dlp
+          # Selector dengan multi-level fallback jika kualitas spesifik tidak tersedia
           if [ "$RAW_QUALITY" = "best" ]; then
             FORMAT_SPEC="bestvideo+bestaudio/best"
           else
-            FORMAT_SPEC="bestvideo[height<=${CLEAN_QUALITY}]+bestaudio/best[height<=${CLEAN_QUALITY}]/best"
+            FORMAT_SPEC="bestvideo[height<=${CLEAN_QUALITY}]+bestaudio/best[height<=${CLEAN_QUALITY}]/bestvideo+bestaudio/best"
           fi
 
           echo "Menjalankan unduhan dengan format: $FORMAT_SPEC"
 
-          # Eksekusi yt-dlp dengan client fallback dan JS runtime
+          # --remote-components ejs:github mengizinkan Deno menyelesaikan n-challenge
+          # player_client ios,mweb mendukung parsing stream terproteksi bersama cookies
           yt-dlp \
             $COOKIE_ARG \
-            --extractor-args "youtube:player_client=android,web" \
+            --remote-components ejs:github \
+            --extractor-args "youtube:player_client=ios,mweb" \
             -f "$FORMAT_SPEC" \
             --merge-output-format mp4 \
             -o "output/${JOB_ID}.%(ext)s" \
             "${{ github.event.inputs.video_url }}"
 
-          # Hapus file cookies demi keamanan runner
           rm -f cookies.txt
 
           OUTPUT_FILE=$(ls output/${JOB_ID}.* | head -n 1)
