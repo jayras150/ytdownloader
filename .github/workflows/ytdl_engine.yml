@@ -53,7 +53,6 @@ jobs:
             COOKIE_ARG="--cookies cookies.txt"
           fi
 
-          # Selector dengan multi-level fallback jika kualitas spesifik tidak tersedia
           if [ "$RAW_QUALITY" = "best" ]; then
             FORMAT_SPEC="bestvideo+bestaudio/best"
           else
@@ -62,8 +61,7 @@ jobs:
 
           echo "Menjalankan unduhan dengan format: $FORMAT_SPEC"
 
-          # --remote-components ejs:github mengizinkan Deno menyelesaikan n-challenge
-          # player_client ios,mweb mendukung parsing stream terproteksi bersama cookies
+          # Eksekusi yt-dlp dengan izin remote components dan player client iOS/mWeb
           yt-dlp \
             $COOKIE_ARG \
             --remote-components ejs:github \
@@ -80,7 +78,8 @@ jobs:
           echo "output_file=$OUTPUT_FILE" >> $GITHUB_OUTPUT
           echo "file_name=$FILE_NAME" >> $GITHUB_OUTPUT
 
-      - name: Upload Video & Status to Cloudflare R2
+      - name: Upload Video & Status Success to Cloudflare R2
+        if: success()
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -108,3 +107,25 @@ jobs:
           EOF
 
           aws s3 cp status.json "s3://${R2_BUCKET_NAME}/status/${JOB_ID}.json" --endpoint-url "$R2_ENDPOINT_URL"
+
+      - name: Upload Failure Status to Cloudflare R2
+        if: failure()
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+        run: |
+          JOB_ID="${{ github.event.inputs.job_id }}"
+
+          cat <<EOF > status_failed.json
+          {
+            "job_id": "${JOB_ID}",
+            "status": "failed",
+            "error": "Download atau proses video gagal di GitHub Actions.",
+            "updated_at": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          }
+          EOF
+
+          aws s3 cp status_failed.json "s3://${R2_BUCKET_NAME}/status/${JOB_ID}.json" --endpoint-url "$R2_ENDPOINT_URL"
