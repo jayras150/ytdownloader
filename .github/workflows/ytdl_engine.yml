@@ -1,0 +1,130 @@
+name: YTDownloader Engine
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_url:
+        description: 'URL Video YouTube'
+        required: true
+        type: string
+      quality:
+        description: 'Format Kualitas Video (misal: 1080, 720, best)'
+        required: false
+        default: '1080'
+      job_id:
+        description: 'Unique Job ID dari Android'
+        required: true
+        type: string
+
+jobs:
+  download_and_upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Deno & Dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+          curl -fsSL https://deno.land/install.sh | sh
+          echo "$HOME/.deno/bin" >> $GITHUB_PATH
+          python -m pip install --upgrade yt-dlp awscli
+
+      - name: Prepare Cookies & Download Video
+        id: ytdl
+        env:
+          YT_COOKIES: ${{ secrets.YT_COOKIES }}
+        run: |
+          JOB_ID="${{ github.event.inputs.job_id }}"
+          RAW_QUALITY="${{ github.event.inputs.quality }}"
+          CLEAN_QUALITY=$(echo "$RAW_QUALITY" | tr -cd '0-9')
+          [ -z "$CLEAN_QUALITY" ] && CLEAN_QUALITY="1080"
+
+          mkdir -p output
+
+          COOKIE_ARG=""
+          if [ -n "$YT_COOKIES" ]; then
+            echo "$YT_COOKIES" > cookies.txt
+            COOKIE_ARG="--cookies cookies.txt"
+          fi
+
+          if [ "$RAW_QUALITY" = "best" ]; then
+            FORMAT_SPEC="bestvideo+bestaudio/best"
+          else
+            FORMAT_SPEC="bestvideo[height<=${CLEAN_QUALITY}]+bestaudio/best[height<=${CLEAN_QUALITY}]/bestvideo+bestaudio/best"
+          fi
+
+          echo "Menjalankan unduhan dengan format: $FORMAT_SPEC"
+
+          yt-dlp \
+            $COOKIE_ARG \
+            --remote-components ejs:github \
+            --extractor-args "youtube:player_client=ios,mweb" \
+            -f "$FORMAT_SPEC" \
+            --merge-output-format mp4 \
+            -o "output/${JOB_ID}.%(ext)s" \
+            "${{ github.event.inputs.video_url }}"
+
+          rm -f cookies.txt
+
+          OUTPUT_FILE=$(ls output/${JOB_ID}.* | head -n 1)
+          FILE_NAME=$(basename "$OUTPUT_FILE")
+          echo "output_file=$OUTPUT_FILE" >> $GITHUB_OUTPUT
+          echo "file_name=$FILE_NAME" >> $GITHUB_OUTPUT
+
+      - name: Upload Video & Status Success to Cloudflare R2
+        if: success()
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          R2_PUBLIC_DOMAIN: ${{ secrets.R2_PUBLIC_DOMAIN }}
+        run: |
+          JOB_ID="${{ github.event.inputs.job_id }}"
+          FILE_PATH="${{ steps.ytdl.outputs.output_file }}"
+          FILE_NAME="${{ steps.ytdl.outputs.file_name }}"
+
+          aws s3 cp "$FILE_PATH" "s3://${R2_BUCKET_NAME}/videos/${FILE_NAME}" --endpoint-url "$R2_ENDPOINT_URL"
+
+          DOWNLOAD_URL="${R2_PUBLIC_DOMAIN}/videos/${FILE_NAME}"
+
+          cat <<EOF > status.json
+          {
+            "job_id": "${JOB_ID}",
+            "status": "ready",
+            "file_name": "${FILE_NAME}",
+            "download_url": "${DOWNLOAD_URL}",
+            "updated_at": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          }
+          EOF
+
+          aws s3 cp status.json "s3://${R2_BUCKET_NAME}/status/${JOB_ID}.json" --endpoint-url "$R2_ENDPOINT_URL"
+
+      - name: Upload Failure Status to Cloudflare R2
+        if: failure()
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+        run: |
+          JOB_ID="${{ github.event.inputs.job_id }}"
+
+          cat <<EOF > status_failed.json
+          {
+            "job_id": "${JOB_ID}",
+            "status": "failed",
+            "error": "Download atau proses video gagal di GitHub Actions.",
+            "updated_at": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          }
+          EOF
+
+          aws s3 cp status_failed.json "s3://${R2_BUCKET_NAME}/status/${JOB_ID}.json" --endpoint-url "$R2_ENDPOINT_URL"
