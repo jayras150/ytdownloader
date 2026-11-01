@@ -8,9 +8,9 @@ on:
         required: true
         type: string
       quality:
-        description: 'Format / Kualitas Video (misal: 1080, 720, best)'
+        description: 'Format Kualitas Video (misal: 1080, 720, best)'
         required: false
-        default: 'best'
+        default: '1080'
       job_id:
         description: 'Unique Job ID dari Android'
         required: true
@@ -28,27 +28,55 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install yt-dlp & FFmpeg
+      # Pasang Deno sebagai JS runtime resmi yang didukung yt-dlp
+      - name: Install Deno & Dependencies
         run: |
           sudo apt-get update && sudo apt-get install -y ffmpeg
+          curl -fsSL https://deno.land/install.sh | sh
+          echo "$HOME/.deno/bin" >> $GITHUB_PATH
           python -m pip install --upgrade yt-dlp awscli
 
-      - name: Download Video via yt-dlp
+      - name: Prepare Cookies & Download Video
         id: ytdl
+        env:
+          YT_COOKIES: ${{ secrets.YT_COOKIES }}
         run: |
           JOB_ID="${{ github.event.inputs.job_id }}"
+          RAW_QUALITY="${{ github.event.inputs.quality }}"
+          # Bersihkan huruf 'p' jika Android mengirim '1080p' -> menjadi '1080'
+          CLEAN_QUALITY=$(echo "$RAW_QUALITY" | tr -cd '0-9')
+          [ -z "$CLEAN_QUALITY" ] && CLEAN_QUALITY="1080"
+
           mkdir -p output
-          
-          # Pilih format sesuai input kualitas
-          FORMAT_SPEC="bestvideo[height<=${{ github.event.inputs.quality }}]+bestaudio/best[height<=${{ github.event.inputs.quality }}]/best"
-          if [ "${{ github.event.inputs.quality }}" = "best" ]; then
-            FORMAT_SPEC="bestvideo+bestaudio/best"
+
+          # Buat file cookies jika secret tersedia
+          COOKIE_ARG=""
+          if [ -n "$YT_COOKIES" ]; then
+            echo "$YT_COOKIES" > cookies.txt
+            COOKIE_ARG="--cookies cookies.txt"
           fi
 
-          echo "Mengunduh video dengan format: $FORMAT_SPEC"
-          yt-dlp -f "$FORMAT_SPEC" --merge-output-format mp4 -o "output/${JOB_ID}.%(ext)s" "${{ github.event.inputs.video_url }}"
+          # Tentukan selector format yt-dlp
+          if [ "$RAW_QUALITY" = "best" ]; then
+            FORMAT_SPEC="bestvideo+bestaudio/best"
+          else
+            FORMAT_SPEC="bestvideo[height<=${CLEAN_QUALITY}]+bestaudio/best[height<=${CLEAN_QUALITY}]/best"
+          fi
 
-          # Cari nama file keluaran
+          echo "Menjalankan unduhan dengan format: $FORMAT_SPEC"
+
+          # Eksekusi yt-dlp dengan client fallback dan JS runtime
+          yt-dlp \
+            $COOKIE_ARG \
+            --extractor-args "youtube:player_client=android,web" \
+            -f "$FORMAT_SPEC" \
+            --merge-output-format mp4 \
+            -o "output/${JOB_ID}.%(ext)s" \
+            "${{ github.event.inputs.video_url }}"
+
+          # Hapus file cookies demi keamanan runner
+          rm -f cookies.txt
+
           OUTPUT_FILE=$(ls output/${JOB_ID}.* | head -n 1)
           FILE_NAME=$(basename "$OUTPUT_FILE")
           echo "output_file=$OUTPUT_FILE" >> $GITHUB_OUTPUT
@@ -67,12 +95,10 @@ jobs:
           FILE_PATH="${{ steps.ytdl.outputs.output_file }}"
           FILE_NAME="${{ steps.ytdl.outputs.file_name }}"
 
-          # 1. Upload Video ke R2
           aws s3 cp "$FILE_PATH" "s3://${R2_BUCKET_NAME}/videos/${FILE_NAME}" --endpoint-url "$R2_ENDPOINT_URL"
 
           DOWNLOAD_URL="${R2_PUBLIC_DOMAIN}/videos/${FILE_NAME}"
 
-          # 2. Buat file metadata status ready
           cat <<EOF > status.json
           {
             "job_id": "${JOB_ID}",
@@ -83,5 +109,4 @@ jobs:
           }
           EOF
 
-          # Upload status.json ke R2 agar Android bisa langsung membaca tanpa rate limit GitHub API
           aws s3 cp status.json "s3://${R2_BUCKET_NAME}/status/${JOB_ID}.json" --endpoint-url "$R2_ENDPOINT_URL"
