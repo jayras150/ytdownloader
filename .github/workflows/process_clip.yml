@@ -1,0 +1,227 @@
+name: Clipzy Full Auto Pipeline
+
+on:
+  repository_dispatch:
+    types: [process_clip]
+  workflow_dispatch:
+    inputs:
+      youtube_url:
+        description: 'URL YouTube'
+        required: true
+        default: 'https://www.youtube.com/watch?v=bLreeqoUUTI'
+      job_id:
+        description: 'Job ID'
+        required: false
+        default: 'test_job'
+
+jobs:
+  auto-process:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 1. Setup Dependency
+      - name: Setup FFmpeg & FFprobe
+        uses: FedericoCarboni/setup-ffmpeg@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Install yt-dlp
+        run: |
+          sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+          sudo chmod a+rx /usr/local/bin/yt-dlp
+
+      # 2. Download Video & Ekstrak Audio
+      - name: Download Video & Extract Audio
+        env:
+          YT_COOKIES: ${{ secrets.YT_COOKIES }}
+        run: |
+          YOUTUBE_URL="${{ github.event.client_payload.youtube_url || github.event.inputs.youtube_url }}"
+          JOB_ID="${{ github.event.client_payload.job_id || github.event.inputs.job_id }}"
+          echo "JOB_ID=$JOB_ID" >> $GITHUB_ENV
+
+          COOKIE_ARG=""
+          if [ -n "$YT_COOKIES" ]; then
+            echo "$YT_COOKIES" > cookies.txt
+            COOKIE_ARG="--cookies cookies.txt"
+          fi
+
+          yt-dlp \
+            $COOKIE_ARG \
+            --remote-components ejs:github \
+            --extractor-args "youtube:player_client=ios,mweb" \
+            -f "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]" \
+            --merge-output-format mp4 \
+            "$YOUTUBE_URL" -o "raw_video.mp4"
+
+          rm -f cookies.txt
+
+          DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 raw_video.mp4)
+          echo "Durasi video: $DURATION detik"
+          echo "VIDEO_DURATION=$DURATION" >> $GITHUB_ENV
+
+          # Ekstrak audio mono ringan (MP3 32k) agar upload instan (< 25MB)
+          ffmpeg -y -i raw_video.mp4 -vn -ac 1 -c:a libmp3lame -b:a 32k audio_speech.mp3
+
+      # 3. Transkrip Audio Menggunakan openai/whisper-1
+      - name: Transcribe Speech via Whisper
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          echo "Mengirim audio ke Whisper (openai/whisper-1)..."
+          TRANSCRIPT_RESPONSE=$(curl -s https://openrouter.ai/api/v1/audio/transcriptions \
+            -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+            -H "HTTP-Referer: https://clipzy.app" \
+            -H "X-Title: Clipzy Engine" \
+            -F file="@audio_speech.mp3" \
+            -F model="openai/whisper-1" \
+            -F response_format="verbose_json")
+
+          echo "$TRANSCRIPT_RESPONSE" > raw_transcript.json
+
+          CLEAN_SEGMENTS=$(jq -r '.segments // empty' raw_transcript.json)
+
+          if [ -z "$CLEAN_SEGMENTS" ] || [ "$CLEAN_SEGMENTS" = "null" ]; then
+            echo "Transkripsi kosong atau gagal, menggunakan fallback text..."
+            echo "[]" > segments.json
+            TRANSCRIPT_SUMMARY="Percakapan audio umum."
+          else
+            echo "$CLEAN_SEGMENTS" > segments.json
+            TRANSCRIPT_SUMMARY=$(jq -r '.[] | "[\(.start | floor)s - \(.end | floor)s] \(.text)"' segments.json | head -n 45)
+          fi
+
+          echo "TRANSCRIPT_SUMMARY<<EOF" >> $GITHUB_ENV
+          echo "$TRANSCRIPT_SUMMARY" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      # 4. Analisis & Scoring Viral via openai/gpt-6-luna
+      - name: AI Viral Moment Scoring & Selection
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          PROMPT_TEXT="Transkrip percakapan video dengan timestamp:
+          $TRANSCRIPT_SUMMARY
+
+          Sebagai kurator video pendek viral, analisa transkrip di atas:
+          1. Pilih 1 segmen paling viral, lucu, atau bermakna hook kuat (panjang 30 hingga 60 detik).
+          2. start_sec dan end_sec harus presisi sesuai ucapan pembicara di transkrip.
+          3. Beri viral_score (1-100), alasan viral, hook penarik perhatian, judul clickbait, deskripsi, dan hashtags.
+          4. Tentukan segmen zoom_cuts (relatif dari 0.0 sampai durasi klip).
+
+          HANYA berikan output JSON murni tanpa markdown:
+          {
+            \"start_sec\": 10.0,
+            \"end_sec\": 45.0,
+            \"viral_score\": 95,
+            \"viral_reason\": \"Hook kuat dan punchline di bagian akhir\",
+            \"hook\": \"Tonton sampai habis!\",
+            \"title\": \"Judul Clickbait Viral\",
+            \"description\": \"Deskripsi untuk Shorts/TikTok\",
+            \"tags\": [\"#viral\", \"#fyp\", \"#shorts\", \"#trending\"],
+            \"zoom_cuts\": [
+              {\"startSec\": 0.0, \"endSec\": 3.0, \"scale\": 1.35, \"target\": \"CENTER\"}
+            ]
+          }"
+
+          PAYLOAD=$(jq -n --arg prompt "$PROMPT_TEXT" '{
+            model: "openai/gpt-6-luna",
+            messages: [
+              {
+                role: "system",
+                content: "You are an expert viral shorts curator. Return only raw valid JSON without markdown fences."
+              },
+              {
+                role: "user",
+                content: $prompt
+              }
+            ],
+            temperature: 0.2
+          }')
+
+          HTTP_RESPONSE=$(curl -s -w "\n%{http_code}" https://openrouter.ai/api/v1/chat/completions \
+            -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+            -H "Content-Type: application/json" \
+            -H "HTTP-Referer: https://clipzy.app" \
+            -H "X-Title: Clipzy Engine" \
+            -d "$PAYLOAD")
+
+          HTTP_BODY=$(echo "$HTTP_RESPONSE" | sed '$d')
+          RAW_CONTENT=$(echo "$HTTP_BODY" | jq -r '.choices[0].message.content // empty')
+          CLEAN_JSON=$(echo "$RAW_CONTENT" | sed 's/```json//g; s/```//g' | tr -d '\r\n')
+
+          if ! echo "$CLEAN_JSON" | jq empty > /dev/null 2>&1 || [ -z "$CLEAN_JSON" ]; then
+            echo "Fallback JSON digunakan..."
+            CLEAN_JSON='{
+              "start_sec": 0.0,
+              "end_sec": 40.0,
+              "viral_score": 88,
+              "viral_reason": "Highlight pembuka video",
+              "hook": "Momen terbaik video ini!",
+              "title": "Highlight Viral",
+              "description": "Klip terbaik yang wajib ditonton",
+              "tags": ["#shorts", "#viral", "#clipzy"],
+              "zoom_cuts": [{"startSec": 0.0, "endSec": 3.0, "scale": 1.35, "target": "CENTER"}]
+            }'
+          fi
+
+          echo "$CLEAN_JSON" > metadata.json
+          cat metadata.json
+
+          START_CUT=$(jq -r '.start_sec' metadata.json)
+          END_CUT=$(jq -r '.end_sec' metadata.json)
+          DURATION_CUT=$(echo "$END_CUT - $START_CUT" | bc)
+
+          echo "START_CUT=$START_CUT" >> $GITHUB_ENV
+          echo "DURATION_CUT=$DURATION_CUT" >> $GITHUB_ENV
+
+          W_EXPR=$(jq -r '.zoom_cuts | reduce .[] as $item ("in_w"; "if(between(t,\($item.startSec),\($item.endSec)),in_w/\($item.scale),\(.))")' metadata.json)
+          H_EXPR=$(jq -r '.zoom_cuts | reduce .[] as $item ("in_h"; "if(between(t,\($item.startSec),\($item.endSec)),in_h/\($item.scale),\(.))")' metadata.json)
+          X_EXPR=$(jq -r '
+            .zoom_cuts | reduce .[] as $item (
+              "(in_w-out_w)/2";
+              (if $item.target == "LEFT" then "(in_w-out_w)*0.2"
+               elif $item.target == "RIGHT" then "(in_w-out_w)*0.8"
+               else "(in_w-out_w)/2" end) as $tx |
+              "if(between(t,\($item.startSec),\($item.endSec)),\($tx),\(.))"
+            )
+          ' metadata.json)
+
+          FILTER_STRING="crop='w=${W_EXPR}:h=${H_EXPR}:x=${X_EXPR}:y=(in_h-out_h)*0.25',scale=1080:1920:flags=bilinear"
+          echo "FFMPEG_FILTER=$FILTER_STRING" >> $GITHUB_ENV
+
+      # 5. Potong Klip & Render Auto-Zoom 9:16
+      - name: Cut Clip & Render Punch-In Zoom
+        run: |
+          echo "Memotong klip dari detik $START_CUT durasi $DURATION_CUT detik..."
+          ffmpeg -y -ss "$START_CUT" -t "$DURATION_CUT" -i raw_video.mp4 \
+            -vf "$FFMPEG_FILTER" \
+            -c:v libx264 -preset ultrafast -crf 22 \
+            -c:a aac -b:a 128k \
+            -movflags +faststart \
+            final_clip.mp4
+
+      # 6. Upload Hasil Klip & Metadata ke Cloudflare R2
+      - name: Upload to Cloudflare R2
+        if: success()
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+        run: |
+          aws s3 cp final_clip.mp4 \
+            "s3://${R2_BUCKET_NAME}/outputs/${JOB_ID}.mp4" \
+            --endpoint-url "$R2_ENDPOINT_URL"
+
+          aws s3 cp metadata.json \
+            "s3://${R2_BUCKET_NAME}/outputs/${JOB_ID}_meta.json" \
+            --endpoint-url "$R2_ENDPOINT_URL"
+
+          echo "Upload selesai."
