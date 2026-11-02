@@ -163,8 +163,8 @@ jobs:
               "output_clips/clip_${IDX}.mp4"
           done
 
-      # Upload Semua Klip & Manifest ke Cloudflare R2
-      - name: Upload Clips and Manifest to Cloudflare R2
+# Upload Klip & Kompatibilitas Path Lama/Baru
+      - name: Upload Clips to Cloudflare R2
         if: success()
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -172,18 +172,32 @@ jobs:
           AWS_DEFAULT_REGION: auto
           R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
           R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          R2_PUBLIC_DOMAIN: ${{ secrets.R2_PUBLIC_DOMAIN }}
         run: |
-          echo "Mengunggah semua klip video ke Cloudflare R2..."
-          aws s3 cp output_clips/ "s3://${R2_BUCKET_NAME}/outputs/${JOB_ID}/" \
-            --recursive \
+          JOB_ID="${{ env.JOB_ID }}"
+
+          # 1. Upload klip utama langsung ke root outputs/ agar terbaca oleh poller lama
+          aws s3 cp "output_clips/clip_1.mp4" \
+            "s3://${R2_BUCKET_NAME}/outputs/${JOB_ID}.mp4" \
             --endpoint-url "$R2_ENDPOINT_URL"
 
-          # Upload manifest berisi list klip, skor viral, hook, title, dan tags
-          aws s3 cp clips_manifest.json "s3://${R2_BUCKET_NAME}/outputs/${JOB_ID}/manifest.json" \
+          # 2. Upload manifest JSON ke root outputs/
+          aws s3 cp clips_manifest.json \
+            "s3://${R2_BUCKET_NAME}/outputs/${JOB_ID}_meta.json" \
             --endpoint-url "$R2_ENDPOINT_URL"
 
-          # Kompatibilitas mundur untuk poller lama yang mencari single output
-          aws s3 cp "output_clips/clip_1.mp4" "s3://${R2_BUCKET_NAME}/outputs/${JOB_ID}.mp4" \
+          # 3. Buat file status JSON penanda bahwa proses selesai 100%
+          cat <<EOF > status.json
+          {
+            "job_id": "${JOB_ID}",
+            "status": "ready",
+            "file_name": "${JOB_ID}.mp4",
+            "download_url": "${R2_PUBLIC_DOMAIN}/outputs/${JOB_ID}.mp4"
+          }
+          EOF
+
+          aws s3 cp status.json \
+            "s3://${R2_BUCKET_NAME}/status/${JOB_ID}.json" \
             --endpoint-url "$R2_ENDPOINT_URL"
 
-          echo "Seluruh klip berhasil diunggah ke R2!"
+          echo "File berhasil diunggah ke semua path kompatibel!"
