@@ -70,14 +70,13 @@ jobs:
 
           ffmpeg -y -i raw_video.mp4 -vn -c:a aac -b:a 64k audio.aac
 
-      # 5. Deteksi Momen Viral via OpenRouter (Curl + jq fix escape)
+# 5. Deteksi Momen Viral via OpenRouter (Curl + JQ)
       - name: Detect Viral Moments via OpenRouter (Curl + JQ)
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
           PROMPT_TEXT="Durasi video: ${VIDEO_DURATION} detik. Tentukan momen-momen punchline / reaksi / hook pembuka untuk efek Punch-In Jump Cut Zoom. Berikan HANYA array JSON murni tanpa markdown, format: [{\"startSec\": 0.0, \"endSec\": 3.0, \"scale\": 1.35, \"target\": \"CENTER\"}]. Pilihan target: LEFT, CENTER, RIGHT. Skala 1.25 s/d 1.45."
 
-          # Susun payload JSON yang valid via jq agar tidak kena Bad Request 400
           PAYLOAD=$(jq -n --arg prompt "$PROMPT_TEXT" '{
             model: "openai/gpt-4o-mini",
             messages: [
@@ -115,20 +114,20 @@ jobs:
 
           echo "AI Segments: $CLEAN_JSON"
 
-          # Generate filter FFmpeg dengan unicode escape \u0027 untuk petik tunggal (mengatasi error jq \x27)
-          FILTER_STRING=$(echo "$CLEAN_JSON" | jq -r '
+          # Ekstraksi ekspresi w, h, dan x secara terpisah dan bersih tanpa kebocoran objek JSON
+          W_EXPR=$(echo "$CLEAN_JSON" | jq -r 'reduce .[] as $item ("in_w"; "if(between(t,\($item.startSec),\($item.endSec)),in_w/\($item.scale),\(.))")')
+          H_EXPR=$(echo "$CLEAN_JSON" | jq -r 'reduce .[] as $item ("in_h"; "if(between(t,\($item.startSec),\($item.endSec)),in_h/\($item.scale),\(.))")')
+          X_EXPR=$(echo "$CLEAN_JSON" | jq -r '
             reduce .[] as $item (
-              {w: "in_w", h: "in_h", x: "(in_w-out_w)/2"};
-              .w = "if(between(t,\($item.startSec),\($item.endSec)),in_w/\($item.scale),\(.w))" |
-              .h = "if(between(t,\($item.startSec),\($item.endSec)),in_h/\($item.scale),\(.h))" |
-              .x = (
-                if $item.target == "LEFT" then "(in_w-out_w)*0.2"
-                elif $item.target == "RIGHT" then "(in_w-out_w)*0.8"
-                else "(in_w-out_w)/2" end
-              ) as $target_x |
-              .x = "if(between(t,\($item.startSec),\($item.endSec)),\($target_x),\(.x))"
-            ) | "crop=\u0027w=\(.w):h=\(.h):x=\(.x):y=(in_h-out_h)*0.25\u0027,scale=1080:1920:flags=bilinear"
+              "(in_w-out_w)/2";
+              (if $item.target == "LEFT" then "(in_w-out_w)*0.2"
+               elif $item.target == "RIGHT" then "(in_w-out_w)*0.8"
+               else "(in_w-out_w)/2" end) as $tx |
+              "if(between(t,\($item.startSec),\($item.endSec)),\($tx),\(.))"
+            )
           ')
+
+          FILTER_STRING="crop='w=${W_EXPR}:h=${H_EXPR}:x=${X_EXPR}:y=(in_h-out_h)*0.25',scale=1080:1920:flags=bilinear"
 
           echo "FFMPEG_FILTER=$FILTER_STRING" >> $GITHUB_ENV
           echo "Generated FFmpeg Filter:"
