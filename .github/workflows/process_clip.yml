@@ -143,17 +143,24 @@ jobs:
             -movflags +faststart \
             final_output.mp4
 
-      # 7. Upload Output ke Cloudflare R2
+# 7. Upload Hasil Render ke Cloudflare R2
       - name: Upload to Cloudflare R2
         if: success()
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          AWS_DEFAULT_REGION: auto
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
         run: |
+          echo "Uploading ke Cloudflare R2 via endpoint: $R2_ENDPOINT_URL"
+          
           aws s3 cp final_output.mp4 \
-            s3://clipzy/outputs/${JOB_ID}.mp4 \
-            --endpoint-url "https://${CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com"
+            "s3://${R2_BUCKET_NAME}/outputs/${JOB_ID}.mp4" \
+            --endpoint-url "$R2_ENDPOINT_URL"
+
+      - name: Pipeline Completed
+        run: echo "Proses selesai! File tersimpan di Cloudflare R2."
 
       - name: Pipeline Completed
         run: echo "Proses selesai! File tersimpan di Cloudflare R2."
