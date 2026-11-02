@@ -10,7 +10,7 @@ on:
       quality:
         description: 'Format Kualitas Video (misal: 1080, 720, best)'
         required: false
-        default: '1080'
+        default: '720'
       job_id:
         description: 'Unique Job ID dari Android'
         required: true
@@ -40,7 +40,7 @@ jobs:
           JOB_ID="${{ github.event.inputs.job_id }}"
           RAW_QUALITY="${{ github.event.inputs.quality }}"
           CLEAN_QUALITY=$(echo "$RAW_QUALITY" | tr -cd '0-9')
-          [ -z "$CLEAN_QUALITY" ] && CLEAN_QUALITY="1080"
+          [ -z "$CLEAN_QUALITY" ] && CLEAN_QUALITY="720"
 
           mkdir -p output
 
