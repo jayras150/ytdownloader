@@ -1,0 +1,127 @@
+name: Clipzy Full Auto Pipeline
+
+on:
+  repository_dispatch:
+    types: [process_clip]
+  workflow_dispatch:
+    inputs:
+      youtube_url:
+        description: 'URL YouTube'
+        required: true
+        default: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'
+      job_id:
+        description: 'Job ID'
+        required: false
+        default: 'test_job'
+
+jobs:
+  auto-process:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install yt-dlp
+        run: |
+          sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+          sudo chmod a+rx /usr/local/bin/yt-dlp
+
+      - name: Download Video & Extract Audio
+        run: |
+          YOUTUBE_URL="${{ github.event.client_payload.youtube_url || github.event.inputs.youtube_url }}"
+          
+          # 1. Download video
+          yt-dlp -f "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]" "$YOUTUBE_URL" -o "raw_video.mp4"
+          
+          # 2. Ambil durasi video via ffprobe
+          DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 raw_video.mp4)
+          echo "VIDEO_DURATION=$DURATION" >> $GITHUB_ENV
+          
+          # 3. Ekstrak audio AAC ringan
+          ffmpeg -y -i raw_video.mp4 -vn -c:a aac -b:a 64k audio.aac
+
+      - name: Detect Viral Moments via OpenRouter (Curl + JQ)
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          PROMPT="Durasi video: ${VIDEO_DURATION} detik. Tentukan momen-momen punchline / reaksi / hook pembuka untuk efek Punch-In Jump Cut Zoom. Berikan HANYA array JSON murni tanpa markdown, format: [{\"startSec\": 0.0, \"endSec\": 3.0, \"scale\": 1.35, \"target\": \"CENTER\"}]. Pilihan target: LEFT, CENTER, RIGHT. Skala 1.25 s/d 1.45."
+
+          # Tembak API OpenRouter langsung via curl
+          HTTP_RESPONSE=$(curl -s -w "\n%{http_code}" https://openrouter.ai/api/v1/chat/completions \
+            -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d @- <<EOF
+          {
+            "model": "openai/gpt-4o-mini",
+            "messages": [
+              {
+                "role": "system",
+                "content": "You are a professional video editor. Output strictly a raw JSON array of zoom segments without markdown fences."
+              },
+              {
+                "role": "user",
+                "content": "$PROMPT"
+              }
+            ],
+            "temperature": 0.2
+          }
+          EOF
+          )
+
+          HTTP_BODY=$(echo "$HTTP_RESPONSE" | sed '$d')
+          HTTP_STATUS=$(echo "$HTTP_RESPONSE" | tail -n1)
+
+          echo "Status API OpenRouter: $HTTP_STATUS"
+
+          # Ekstrak konten response dan bersihkan markdown jika ada
+          RAW_CONTENT=$(echo "$HTTP_BODY" | jq -r '.choices[0].message.content // empty')
+          CLEAN_JSON=$(echo "$RAW_CONTENT" | sed 's/```json//g; s/```//g' | tr -d '\r\n')
+
+          # Validasi apakah JSON valid, jika gagal pakai fallback detik 0 - 3
+          if ! echo "$CLEAN_JSON" | jq empty > /dev/null 2>&1 || [ -z "$CLEAN_JSON" ]; then
+            echo "Format AI tidak valid atau gagal, menggunakan fallback opening hook 0-3s..."
+            CLEAN_JSON='[{"startSec":0.0,"endSec":3.0,"scale":1.35,"target":"CENTER"}]'
+          fi
+
+          echo "AI Segments: $CLEAN_JSON"
+
+          # 4. Generate filter FFmpeg menggunakan JQ langsung di bash
+          FILTER_STRING=$(echo "$CLEAN_JSON" | jq -r '
+            reduce .[] as $item (
+              {w: "in_w", h: "in_h", x: "(in_w-out_w)/2"};
+              .w = "if(between(t,\($item.startSec),\($item.endSec)),in_w/\($item.scale),\(.w))" |
+              .h = "if(between(t,\($item.startSec),\($item.endSec)),in_h/\($item.scale),\(.h))" |
+              .x = (
+                if $item.target == "LEFT" then "(in_w-out_w)*0.2"
+                elif $item.target == "RIGHT" then "(in_w-out_w)*0.8"
+                else "(in_w-out_w)/2" end
+              ) as $target_x |
+              .x = "if(between(t,\($item.startSec),\($item.endSec)),\($target_x),\(.x))"
+            ) | "crop=w=\x27\(.w)\x27:h=\x27\(.h)\x27:x=\x27\(.x)\x27:y=\x27(in_h-out_h)*0.25\x27,scale=1080:1920:flags=bilinear"
+          ')
+
+          echo "FFMPEG_FILTER=$FILTER_STRING" >> $GITHUB_ENV
+          echo "Hasil Filter FFmpeg:"
+          echo "$FILTER_STRING"
+
+      - name: Render Punch-In Zoom Video (FFmpeg)
+        run: |
+          ffmpeg -y -i raw_video.mp4 \
+            -vf "$FFMPEG_FILTER" \
+            -c:v libx264 -preset veryfast -crf 22 \
+            -c:a copy \
+            -movflags +faststart \
+            final_output.mp4
+
+      - name: Upload to Cloudflare R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          JOB_ID="${{ github.event.client_payload.job_id || github.event.inputs.job_id }}"
+          
+          # Cloudflare R2 kompatibel 100% dengan AWS CLI bawaan runner
+          aws s3 cp final_output.mp4 \
+            s3://clipzy/outputs/${JOB_ID}.mp4 \
+            --endpoint-url "https://${CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com"
+
+      - name: Pipeline Completed
+        run: echo "Proses selesai! File tersimpan di Cloudflare R2."
