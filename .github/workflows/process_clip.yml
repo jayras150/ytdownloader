@@ -99,7 +99,7 @@ jobs:
         run: |
           SUB_FILE=$(ls *.srt 2>/dev/null | head -n 1)
           if [ -n "$SUB_FILE" ] && [ -f "$SUB_FILE" ]; then
-            CLEAN_TEXT=$(grep -vE '^[0-9]+$' "$SUB_FILE" | grep -vE '^[0-9]{2}:[0-9]{2}' | tr '\n' ' ' | sed 's/  */ /g' | cut -c 1-3500)
+            CLEAN_TEXT=$(grep -vE '^[0-9]+$' "$SUB_FILE" | grep -vE '^[0-9]{2}:[0-9]{2}' | tr '\n' ' ' | tr -s ' ' | cut -c 1-3500)
             echo "TRANSCRIPT_SUMMARY=$CLEAN_TEXT" >> $GITHUB_ENV
           else
             echo "TRANSCRIPT_SUMMARY=Engaging conversational video discussing highlights and viral topics with total duration $VIDEO_DURATION seconds." >> $GITHUB_ENV
@@ -219,7 +219,6 @@ print(json.dumps(clips))
               DUR=30
             fi
 
-            # Format kondisi filter zoom FFmpeg: between(t,s1,e1)+between(t,s2,e2)
             ZOOM_COND=$(echo "$clip" | jq -r '[.zoom_cuts[]? | "between(t," + (.start_rel_sec|tostring) + "," + (.end_rel_sec|tostring) + ")"] | join("+")')
 
             if [ -z "$ZOOM_COND" ] || [ "$ZOOM_COND" = "null" ]; then
@@ -228,7 +227,6 @@ print(json.dumps(clips))
 
             echo "Rendering Clip #$COUNT: $START to $END (Dur: $DUR s) | Dynamic Zoom Filter: $ZOOM_COND"
 
-            # Filter Zoom Dinamis: Hanya zoom in 1.25x (crop 0.8x) saat ZOOM_COND bernilai true
             DYNAMIC_FILTER="crop='w=if($ZOOM_COND, min(in_w,in_h*9/16)*0.8, min(in_w,in_h*9/16)):h=if($ZOOM_COND, min(in_h,in_w*16/9)*0.8, min(in_h,in_w*16/9)):x=(in_w-out_w)/2:y=(in_h-out_h)/2',scale=1080:1920:flags=bilinear"
 
             ffmpeg -nostdin -y -i raw_video.mp4 \
@@ -265,12 +263,10 @@ print(json.dumps(clips))
         run: |
           JOB_ID="${{ env.JOB_ID }}"
 
-          # Upload seluruh klip (clip_1.mp4 s/d clip_6+.mp4)
           aws s3 cp output_clips/ "s3://${R2_BUCKET_NAME}/outputs/${JOB_ID}/" \
             --recursive \
             --endpoint-url "$R2_ENDPOINT_URL"
 
-          # Upload primary clip untuk kompatibilitas
           FIRST_CLIP=$(ls output_clips/*.mp4 | head -n 1)
           if [ -f "$FIRST_CLIP" ]; then
             aws s3 cp "$FIRST_CLIP" \
@@ -278,7 +274,6 @@ print(json.dumps(clips))
               --endpoint-url "$R2_ENDPOINT_URL"
           fi
 
-          # Upload metadata JSON
           aws s3 cp clips_manifest.json \
             "s3://${R2_BUCKET_NAME}/outputs/${JOB_ID}_meta.json" \
             --endpoint-url "$R2_ENDPOINT_URL"
@@ -287,7 +282,6 @@ print(json.dumps(clips))
             "s3://${R2_BUCKET_NAME}/outputs/${JOB_ID}/manifest.json" \
             --endpoint-url "$R2_ENDPOINT_URL"
 
-          # Upload ready status flag
           cat <<EOF > status.json
           {
             "job_id": "${JOB_ID}",
@@ -301,4 +295,4 @@ print(json.dumps(clips))
             "s3://${R2_BUCKET_NAME}/status/${JOB_ID}.json" \
             --endpoint-url "$R2_ENDPOINT_URL"
 
-          echo "Seluruh klip (min 6 clips) & AI Dynamic Zoom berhasil diunggah ke Cloudflare R2!"
+          echo "Upload complete."
