@@ -189,7 +189,7 @@ jobs:
           echo "$CLEAN_JSON" > clips_manifest.json
           cat clips_manifest.json
 
-      # 7. Render Semua Klip (Format Kompatibel HP Android & Frame-Accurate)
+# 7. Render Semua Klip (Fix stdin hijack via -nostdin)
       - name: Render All Clips (Android Compatible)
         run: |
           mkdir -p output_clips
@@ -200,15 +200,17 @@ jobs:
             END=$(echo "$clip" | jq -r '.end_sec')
             DUR=$(echo "$END - $START" | bc)
 
+            echo "----------------------------------------------------"
             echo "Rendering Clip #$IDX: Mulai $START detik, Durasi $DUR detik..."
 
-            ffmpeg -y -ss "$START" -t "$DUR" -i raw_video.mp4 \
+            # Parameter -nostdin WAJIB agar ffmpeg tidak menelan baris stdin loop while
+            ffmpeg -nostdin -y -ss "$START" -t "$DUR" -i raw_video.mp4 \
               -vf "crop='w=min(in_w,in_h*9/16):h=min(in_h,in_w*16/9):x=(in_w-out_w)/2:y=(in_h-out_h)/2',scale=1080:1920:flags=bilinear" \
               -c:v libx264 -preset ultrafast -crf 22 \
               -pix_fmt yuv420p \
               -c:a aac -b:a 128k \
               -movflags +faststart \
-              "output_clips/clip_${IDX}.mp4"
+              "output_clips/clip_${IDX}.mp4" < /dev/null
           done
 
       # 8. Upload Semua Klip & Metadata ke Cloudflare R2
