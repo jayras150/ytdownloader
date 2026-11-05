@@ -1056,8 +1056,21 @@ jobs:
           import urllib.request
 
           params = json.load(open("work/params.json", encoding="utf-8"))
+          wm_b64 = params.get("watermark_base64", "").strip()
           wm_url = params.get("watermark_url", "").strip()
-          if wm_url:
+          if wm_b64:
+              print("Decoding Base64 watermark logo...")
+              try:
+                  import base64
+                  if wm_b64.startswith("data:"):
+                      wm_b64 = wm_b64.split(",", 1)[-1]
+                  data = base64.b64decode(wm_b64)
+                  with open("work/watermark_logo.png", "wb") as fh:
+                      fh.write(data)
+                  print(f"Successfully decoded Base64 watermark_logo.png ({len(data)} bytes) for FFmpeg overlay.")
+              except Exception as e:
+                  print(f"WARN: failed to decode Base64 watermark logo: {e}; skipping watermark overlay.")
+          elif wm_url:
               print(f"Downloading branding watermark logo from {wm_url}...")
               try:
                   urllib.request.urlretrieve(wm_url, "work/watermark_logo.png")
@@ -1068,7 +1081,7 @@ jobs:
               except Exception as e:
                   print(f"WARN: failed to download watermark logo: {e}; skipping watermark overlay.")
           else:
-              print("No watermark_url provided: skipping watermark overlay.")
+              print("No watermark_base64 or watermark_url provided: skipping watermark overlay.")
           PY_WM
 
       - name: Transcribe speech with Whisper (word-level timestamps)
@@ -2225,7 +2238,7 @@ jobs:
           - duration: {duration:.1f} seconds
           - resolution: {source['width']}x{source['height']} ({source['aspect_ratio']})
           - frame rate: {source['fps']:g} fps
-          - spoken language: {language}
+          - spoken language: {language} (MANDATORY: ALL TITLES, DESCRIPTIONS, TOPICS, AND HASHTAGS MUST BE WRITTEN IN THIS EXACT SPOKEN LANGUAGE, E.G. BAHASA INDONESIA IF SPOKEN LANGUAGE IS INDONESIAN)
           - faces: {face_summary}
 
           KEYFRAMES (attached as images, in timeline order)
@@ -2246,9 +2259,9 @@ jobs:
           - viral_score: honest integer 1-100.
           - topic: the specific subject of THIS clip.
           - hook: a short quote VERBATIM from the transcript inside the clip, or "" if unsure. Never invent quotes.
-          - title: specific, accurate, max 65 characters, in the video's spoken language. No generic clickbait like "Amazing Video" or "Video Highlight". No fabricated identities.
-          - description: what is actually said and shown in this specific clip, max 280 characters. Do not repeat the title.
-          - tags: 3-5 hashtags genuinely relevant to the topic, category and subjects. Do NOT pad with #viral #fyp #shorts #trending unless truly appropriate.
+          - title: HIGH-CTR & VIRAL. Specific, engaging, curiosity-inducing, max 60 characters, written in the EXACT SPOKEN LANGUAGE of the video (e.g., Bahasa Indonesia for Indonesian videos). Never use generic clickbait like "Amazing Video" or "Video Highlight". No generic English titles for non-English videos.
+          - description: accurate, engaging summary of what is actually said/shown in the clip in the video's spoken language, max 200 characters.
+          - tags: 4-5 niche-specific hashtags strictly grounded in the clip's topic, category and keywords (e.g. #investasi #keuangan #saham #bisnis for finance videos in Indonesian). NEVER use generic placeholders like #shorts #viral #fyp unless strictly relevant.
           - visual_analysis: main_subject and scene grounded in the keyframes nearest to the clip.
 
           ZOOM RULES (CRITICAL):
@@ -3668,11 +3681,11 @@ jobs:
           {chr(10).join(blocks)}
 
           RULES (per clip):
-          - title: max 65 characters, same language as the video, specific and engaging but never misleading. No generic filler ("Amazing Video", "Video Highlight", "Must Watch"). Never invent identities; describe roles when names are unknown.
-          - description: what is actually said and shown in this specific clip, max 280 characters, do not repeat the title.
-          - topic: a short specific topic label.
+          - title: HIGH-CTR & VIRAL, max 60 characters, written in the EXACT SPOKEN LANGUAGE of the video (e.g. Bahasa Indonesia for Indonesian videos). Specific, engaging, curiosity-inducing, never misleading. No generic filler ("Amazing Video", "Video Highlight", "Must Watch").
+          - description: what is actually said and shown in this specific clip in the video's spoken language, max 200 characters, do not repeat the title.
+          - topic: a short specific topic label in the video's spoken language.
           - hook: a short quote VERBATIM from the transcript context inside the clip, or "" when none fits. Never invent quotes.
-          - tags: 3-5 hashtags genuinely relevant (topic, category, subjects, keywords). Only include #viral #fyp #shorts #trending when truly appropriate for this clip.
+          - tags: 4-5 niche-specific hashtags strictly grounded in the clip's topic, category, and keywords (e.g. #investasi #keuangan #saham for finance videos in Indonesian). Do NOT pad with generic #viral #fyp #shorts unless genuinely relevant.
           - visual_analysis: main_subject (role-based description) and scene, grounded in the frame analysis.
           - faces_detected is a measured computer-vision fact: never contradict it.
 
