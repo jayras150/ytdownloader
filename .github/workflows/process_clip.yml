@@ -386,6 +386,11 @@ jobs:
                   print(f"  - {error}")
               sys.exit(1)
 
+          watermark_url = pick("watermark_url", "watermarkUrl", default="")
+          watermark_position = pick("watermark_position", "watermarkPosition", default="bottom_right").lower()
+          if watermark_position not in ("top_left", "top_right", "bottom_left", "bottom_right"):
+              watermark_position = "bottom_right"
+
           params = {
               "youtube_url": youtube_url,
               "job_id": job_id,
@@ -396,6 +401,8 @@ jobs:
               "preserve_source_quality": preserve_quality,
               "output_quality": output_quality,
               "manual_transform": manual_transform,
+              "watermark_url": watermark_url,
+              "watermark_position": watermark_position,
           }
 
           os.makedirs("work", exist_ok=True)
@@ -1034,6 +1041,31 @@ jobs:
 
           print(f"Speech audio plan: {len(chunks)} chunk(s), {CHUNK_SECONDS:.0f}s each, {OVERLAP_SECONDS:.0f}s overlap.")
           PY_CHUNK
+
+      - name: Download branding watermark logo (if enabled)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 <<'PY_WM'
+          import json
+          import os
+          import urllib.request
+
+          params = json.load(open("work/params.json", encoding="utf-8"))
+          wm_url = params.get("watermark_url", "").strip()
+          if wm_url:
+              print(f"Downloading branding watermark logo from {wm_url}...")
+              try:
+                  urllib.request.urlretrieve(wm_url, "work/watermark_logo.png")
+                  if os.path.exists("work/watermark_logo.png") and os.path.getsize("work/watermark_logo.png") > 0:
+                      print("Successfully downloaded watermark_logo.png for FFmpeg overlay.")
+                  else:
+                      print("WARN: downloaded watermark file is empty; skipping watermark overlay.")
+              except Exception as e:
+                  print(f"WARN: failed to download watermark logo: {e}; skipping watermark overlay.")
+          else:
+              print("No watermark_url provided: skipping watermark overlay.")
+          PY_WM
 
       - name: Transcribe speech with Whisper (word-level timestamps)
         shell: bash
@@ -3996,6 +4028,20 @@ jobs:
                       final_scale = "none (already at canvas size)"
                   chain_parts.extend(tail)
                   graph = "[0:v]" + ",".join(chain_parts) + "[vfinal]"
+
+              wm_file = "work/watermark_logo.png"
+              has_wm = os.path.exists(wm_file) and os.path.getsize(wm_file) > 0
+              wm_pos = params.get("watermark_position", "bottom_right").lower()
+              wm_xy = {
+                  "top_left": "24:24",
+                  "top_right": "main_w-overlay_w-24:24",
+                  "bottom_left": "24:main_h-overlay_h-24",
+                  "bottom_right": "main_w-overlay_w-24:main_h-overlay_h-24"
+              }.get(wm_pos, "main_w-overlay_w-24:main_h-overlay_h-24")
+
+              if has_wm:
+                  graph = graph.replace("[vfinal]", "[vpre]")
+                  graph += f";movie={wm_file},scale={out_w}*0.18:-1[wm];[vpre][wm]overlay={wm_xy}[vfinal]"
 
               # QC reference graphs: the identical video chain WITHOUT the
               # subtitle filter (qc_graph), plus a zoom-neutral variant
