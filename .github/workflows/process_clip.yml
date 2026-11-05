@@ -390,6 +390,9 @@ jobs:
           watermark_position = pick("watermark_position", "watermarkPosition", default="bottom_right").lower()
           if watermark_position not in ("top_left", "top_right", "bottom_left", "bottom_right"):
               watermark_position = "bottom_right"
+          watermark_size = pick("watermark_size", "watermarkSize", default="medium").lower()
+          if watermark_size not in ("small", "medium", "large"):
+              watermark_size = "medium"
 
           params = {
               "youtube_url": youtube_url,
@@ -403,6 +406,7 @@ jobs:
               "manual_transform": manual_transform,
               "watermark_url": watermark_url,
               "watermark_position": watermark_position,
+              "watermark_size": watermark_size,
           }
 
           os.makedirs("work", exist_ok=True)
@@ -4032,6 +4036,13 @@ jobs:
               wm_file = "work/watermark_logo.png"
               has_wm = os.path.exists(wm_file) and os.path.getsize(wm_file) > 0
               wm_pos = params.get("watermark_position", "bottom_right").lower()
+              wm_size_key = params.get("watermark_size", "medium").lower()
+              wm_scale_factor = {
+                  "small": 0.12,
+                  "medium": 0.18,
+                  "large": 0.26
+              }.get(wm_size_key, 0.18)
+
               wm_xy = {
                   "top_left": "24:24",
                   "top_right": "main_w-overlay_w-24:24",
@@ -4041,7 +4052,7 @@ jobs:
 
               if has_wm:
                   graph = graph.replace("[vfinal]", "[vpre]")
-                  graph += f";movie={wm_file},scale={out_w}*0.18:-1[wm];[vpre][wm]overlay={wm_xy}[vfinal]"
+                  graph += f";movie={wm_file},scale={out_w}*{wm_scale_factor}:-1[wm];[vpre][wm]overlay={wm_xy}[vfinal]"
 
               # QC reference graphs: the identical video chain WITHOUT the
               # subtitle filter (qc_graph), plus a zoom-neutral variant
