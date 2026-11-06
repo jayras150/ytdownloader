@@ -82,6 +82,26 @@ on:
         required: false
         type: string
         default: ''
+      watermark_base64:
+        description: 'Base64 encoded watermark logo PNG'
+        required: false
+        type: string
+        default: ''
+      watermark_url:
+        description: 'URL to watermark logo PNG'
+        required: false
+        type: string
+        default: ''
+      watermark_position:
+        description: 'Watermark position (top_left, top_right, bottom_left, bottom_right)'
+        required: false
+        type: string
+        default: 'bottom_right'
+      watermark_size:
+        description: 'Watermark size (small, medium, large)'
+        required: false
+        type: string
+        default: 'medium'
 
 permissions:
   contents: read
